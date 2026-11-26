@@ -528,10 +528,10 @@ public sealed partial class Win
         }
     }
 
-    // NEAT's own icon (the file next to neat.exe, which is the exe's icon too); a glyph when it is not there.
+    // NEAT's logo (neat.png next to neat.exe, see neat.csproj); a glyph when it is not there.
     private static UIElement CwsNeatIcon(Skin skin)
     {
-        var file = Path.Combine(AppContext.BaseDirectory, "neat.ico");
+        var file = Path.Combine(AppContext.BaseDirectory, "neat.png");
 
         try
         {

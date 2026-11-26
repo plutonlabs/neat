@@ -56,8 +56,8 @@
          Since 152.0.4191.53 the runtime no longer fits in one NuGet package,
          so it is split in two: both are required, and they must stay on the
          same version. -->
-    <PackageReference Include="WebView2.Runtime.X64" Version="157.0.4341.42" />
-    <PackageReference Include="WebView2.Runtime.X64.Core" Version="157.0.4341.42" />
+    <PackageReference Include="WebView2.Runtime.X64" Version="158.0.4370.33" />
+    <PackageReference Include="WebView2.Runtime.X64.Core" Version="158.0.4370.33" />
 
     <!-- SQLite for history and bookmarks (browser.db). Same version Mozart uses. -->
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.8" />
@@ -68,6 +68,10 @@
          publish). The settings window gives itself this icon in opts.xaml.cs; the exe's
          embedded icon cannot be handed to a window by path. -->
     <None Include="$(AppIco)" Link="neat.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+
+    <!-- The logo as a picture, for the Chrome Web Store question (win.cws.cs). The .ico will not do there:
+         XAML draws its first size, 16 pixels, stretched. -->
+    <None Include="..\..\browser\branding\official\default128.png" Link="neat.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
