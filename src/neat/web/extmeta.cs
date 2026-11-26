@@ -99,9 +99,16 @@ internal sealed class ExtMeta
     public List<string> Risk { get; init; } = new();
 
     /// <summary>
+    /// Everything it can do, as "It can:" and one line each, the high risk ones first; or a line that says it
+    /// asks for nothing notable. The Chrome Web Store question says it this way: one list that leaves nothing out.
+    /// </summary>
+    public string AskText => Can.Count == 0
+        ? "It asks for no special permissions."
+        : "It can:\n" + Bullets(Risk.Concat(Can.Where(c => !Risk.Contains(c))));
+
+    /// <summary>
     /// The high risk warning in words (what the lines of <see cref="Risk"/> allow, and to trust where the
-    /// extension came from), or null when there is none. The Extensions page and the Chrome Web Store
-    /// question both say it this way, so it is made here, once.
+    /// extension came from), or null when there is none. For the Extensions page.
     /// </summary>
     public string? RiskText => Risk.Count == 0
         ? null

@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -10,26 +9,29 @@ using Windows.Storage.Streams;
 namespace neat;
 
 /// <summary>
-/// The "Add to NEAT" button on the Chrome Web Store: the window's side of it. The page script is in
+/// Adding an extension from the Chrome Web Store: the window's side of it. The page script is in
 /// web/cwsjs.cs, the download in web/cws.cs, the signature check in web/crxsig.cs, and what is done with
-/// an extension once it is accepted in web/extadd.cs (the Extensions page uses the same). This file connects
-/// them to the window and asks the person.
+/// an extension once it is accepted in web/extadd.cs (the Extensions page uses the same). The question
+/// itself is drawn by win.cwsbox.cs. This file connects them to the window.
 ///
 /// How an install travels:
-///   1. The page script says which extension the person clicked (cws-install, the id from the address) and the
-///      window answers "busy" to that tab.
-///   2. The package is downloaded from Google into a file of its own (never held in memory), its signature is
-///      checked (it must be a CRX3 for this very id), and it is unpacked into a staging folder. Nothing of it runs.
-///   3. Only then is the person asked, in a dialog: the extension's name and icon, what it can do (the same words
-///      and the same red warning as the Extensions page), and Add to NEAT or Cancel. Nothing is added without that click.
-///   4. Add keeps a copy, tells the browser, and the page says "Added". Cancel, Esc, closing the tab or the window
-///      drops everything (the staging folder and the file) and the page goes back to "Add to NEAT".
+///   1. The page script says which extension's install button the person clicked (cws-install, the id from
+///      the address). The button on the page keeps the store's own words; nothing is sent back to it.
+///   2. The question opens at once, with a turning ring and Cancel.
+///   3. Behind it the package is downloaded from Google into a file of its own (never held in memory), its
+///      signature is checked (it must be a CRX3 for this very id), and it is unpacked into a staging folder.
+///      Nothing of it runs.
+///   4. The question fills in: the extension's name and icon, everything it can do, Cancel and Add to NEAT.
+///      Nothing is added without that click.
+///   5. Add keeps a copy, tells the browser, and the question closes. Cancel, Esc, closing the tab or the
+///      window drops everything (the staging folder and the file).
+///   An extension that is in already, and a failure, are said in the same dialog, with Close.
 ///
 /// What is accepted from a page: a text message that starts with this window's prefix, from the store (https, its
 /// host, the default port) in the page the tab shows, about the extension whose page that is. A page can post
 /// anything, so none of that is trusted for more than what it is worth: the id is checked again against the
 /// address of the tab, the extension asked about is shown to the person with what it can do, and the question is
-/// the protection. One install runs at a time in the window; another click gets "Add to NEAT" back.
+/// the protection. One question is open at a time in the window.
 /// Frames speak through their own channel (win.frames.cs), which this file does not listen to.
 ///
 /// Not written to the log: addresses, paths, anything the download said. The id, the name (tidied) and the outcome are.
@@ -39,8 +41,8 @@ public sealed partial class Win
     // The longest message that is looked at. The script's own are under a hundred bytes.
     private const int CwsMaxMessage = 1024;
 
-    // How many times a page without the button is written to the log in one run.
-    private const int CwsMaxMissing = 5;
+    // How many times "the store script is running" is written to the log in one run.
+    private const int CwsMaxLoaded = 5;
 
     // How big the icons of the question are (device independent pixels), and what they are decoded at.
     private const int CwsIconSize = 40;
@@ -59,7 +61,7 @@ public sealed partial class Win
         public Tab Tab { get; }
         public string Id { get; }
 
-        /// <summary>Cancelled when the tab or the window goes away.</summary>
+        /// <summary>Cancelled when the question closes, and when the tab or the window goes away.</summary>
         public CancellationTokenSource Stop { get; } = new();
 
         /// <summary>The downloaded file, until it is unpacked or the install ends.</summary>
@@ -68,8 +70,14 @@ public sealed partial class Win
         /// <summary>The staging folder, until the extension is kept or the install ends.</summary>
         public string? Stage;
 
+        /// <summary>What the unpacked package says it is; null until the question is asked.</summary>
+        public ExtMeta? Meta;
+
         /// <summary>The dialog on screen, if there is one.</summary>
         public ContentDialog? Box;
+
+        /// <summary>The adding that Add to NEAT started, if it was clicked.</summary>
+        public Task Adding = Task.CompletedTask;
 
         /// <summary>True while the extension is being added: the dialog cannot be closed then.</summary>
         public bool Busy;
@@ -79,7 +87,7 @@ public sealed partial class Win
     }
 
     private CwsFlow? _cws;
-    private int _cwsMissing;
+    private int _cwsLoaded;
 
     // ---- wiring ----
 
@@ -187,23 +195,20 @@ public sealed partial class Win
 
             switch (JsonText(root, "kind"))
             {
-                case "cws-nobutton":
-                    CwsMissing();
-                    break;
-
-                case "cws-ready" when Cws.IsId(id):
-                    // The extension has to be the one of the page the tab is on.
-                    if (Cws.PageId(core.Source) == id)
-                        _ = CwsGuard(() => CwsReady(tab, id!), "answering the store page");
-
+                case "cws-loaded":
+                    CwsSeen();
                     break;
 
                 case "cws-install" when Cws.IsId(id):
-                    if (Cws.PageId(core.Source) == id)
-                        _ = CwsGuard(() => CwsInstall(tab, id!), "adding an extension from the store");
-                    else
-                        CwsReply(tab, id!, "add");   // so that the button does not stay on "Adding..."
+                    // The extension has to be the one of the page the tab is on.
+                    if (Cws.PageId(core.Source) != id)
+                    {
+                        Log.Write("ext", "store " + id + ": the click was not taken, the tab is on another page");
+                        break;
+                    }
 
+                    // The dialog is not opened from inside the web view's own event.
+                    DispatcherQueue.TryEnqueue(() => _ = CwsGuard(() => CwsInstall(tab, id!), "adding an extension from the store"));
                     break;
             }
         }
@@ -217,32 +222,15 @@ public sealed partial class Win
         }
     }
 
-    // A page without the button, as the script saw it. Written to the log, a few times at most, so that the
-    // person who reports "the button is not there" has a line to point at.
-    private void CwsMissing()
+    // The script is in place on a page of the store. Written to the log, a few times at most, so that the
+    // person who reports "the click does nothing of ours" has a line to point at, or the lack of one.
+    private void CwsSeen()
     {
-        if (_cwsMissing >= CwsMaxMissing)
+        if (_cwsLoaded >= CwsMaxLoaded)
             return;
 
-        _cwsMissing++;
-        Log.Write("ext", "store page: install button not found (the store's page may have changed)");
-    }
-
-    /// <summary>Tells a tab the state of the button for an extension. Nothing happens for a tab that has gone.</summary>
-    private void CwsReply(Tab tab, string id, string state)
-    {
-        try
-        {
-            if (_closed || !_tabs.Contains(tab) || tab.View.CoreWebView2 is not { } core)
-                return;
-
-            // Both values come from this code (state) or have been checked (id: 32 letters), so nothing needs escaping.
-            core.PostWebMessageAsString(CwsScript.Prefix(_tok) + "{\"state\":\"" + state + "\",\"id\":\"" + id + "\"}");
-        }
-        catch (Exception ex)
-        {
-            Log.Write("ext", "the store page could not be answered (" + ex.GetType().Name + ")");
-        }
+        _cwsLoaded++;
+        Log.Write("ext", "store page: the install button script is running");
     }
 
     private static async Task CwsGuard(Func<Task> work, string what)
@@ -257,137 +245,214 @@ public sealed partial class Win
         }
     }
 
-    // ---- the state of the button ----
-
-    private async Task CwsReady(Tab tab, string id)
-    {
-        var has = await CwsHas(id);
-
-        // A click may have started the install while this was being looked up.
-        var state = _cws is { } f && f.Tab == tab && f.Id == id ? "busy" : has ? "added" : "add";
-        CwsReply(tab, id, state);
-    }
-
-    /// <summary>
-    /// True when the extension of this store id is in. The list of copies says it came from the store; the
-    /// browser's own list says it is still there (an extension that was removed some other way is not "Added").
-    /// </summary>
-    private static async Task<bool> CwsHas(string id)
-    {
-        var web = await Task.Run(() => ExtAdd.Store.WebId(id));
-        if (web is null)
-            return false;
-
-        // With no live profile to ask, the list of copies is all there is.
-        if (!Ext.Live)
-            return true;
-
-        return (await Ext.All()).Any(x => x.Id == web);
-    }
-
     // ---- one install ----
 
     private async Task CwsInstall(Tab tab, string id)
     {
-        if (_cws is { } other)
-        {
-            // One at a time. The one that asked for this is told so; any other gets its button back.
-            CwsReply(tab, id, other.Tab == tab && other.Id == id ? "busy" : "add");
+        // One at a time. The dialog covers the window, so the person cannot click again while it is open.
+        if (_cws is not null || _closed || !_tabs.Contains(tab) || root.XamlRoot is not { } xr)
             return;
-        }
 
-        // Set before the first await, so that a second click cannot start a second install.
+        // Set before the first await, so that a second message cannot open a second question.
         var flow = new CwsFlow(tab, id);
         _cws = flow;
-        CwsReply(tab, id, "busy");
         Log.Write("ext", "store " + id + ": install asked for");
 
-        var state = "add";
+        var preparing = Task.CompletedTask;
 
         try
         {
-            if (await CwsRun(flow))
-                state = "added";
-        }
-        catch (OperationCanceledException)
-        {
-            // The tab or the window went away: nothing more to do or to say.
+            var box = new CwsBox(CwsSkin(), xr);
+            box.Add.Click += (s, a) => flow.Adding = CwsAdd(flow, box);
+
+            // The question is on screen first; what goes in it is fetched meanwhile.
+            var shown = CwsShow(flow, box.Dialog);
+            preparing = CwsPrepare(flow, box);
+            await shown;
         }
         catch (Exception ex)
         {
-            Log.Error("ext", ex, "store " + id + ": the install failed");
-            await CwsError(flow, "The extension could not be added.");
+            Log.Error("ext", ex, "store " + id + ": the question failed");
         }
         finally
         {
+            // The question is over: whatever is still being done for it is not wanted.
+            flow.Stop.Cancel();
             _cws = null;
-            CwsClean(flow);
-            CwsReply(tab, id, state);
-            flow.Stop.Dispose();
+        }
+
+        // Unpacking cannot be interrupted, so the work may still be winding down. What it leaves behind is
+        // removed once it has; the next question does not wait for that.
+        await preparing;
+        await flow.Adding;
+
+        Log.Write("ext", "store " + id + ": " + (flow.Added ? "added" : "not added"));
+        CwsClean(flow);
+        flow.Stop.Dispose();
+    }
+
+    /// <summary>
+    /// Everything between the question opening and the question being asked: it ends with the dialog showing
+    /// the extension, or a sentence. Never throws. A dialog that has been closed meanwhile cancels it.
+    /// </summary>
+    private async Task CwsPrepare(CwsFlow f, CwsBox box)
+    {
+        var ct = f.Stop.Token;
+
+        void Fail(string why)
+        {
+            Log.Write("ext", "store " + f.Id + ": " + why);
+            box.Say("Could not add the extension", why);
+        }
+
+        try
+        {
+            var store = ExtAdd.Store;
+
+            var (has, known) = await CwsHas(f.Id);
+            ct.ThrowIfCancellationRequested();
+            if (has)
+            {
+                Log.Write("ext", "store " + f.Id + ": already added");
+                var what = Cws.Tidy(known, 60) is { Length: > 0 } n ? "\u201c" + n + "\u201d" : "This extension";
+                box.Say("Already added", what + " is in NEAT already. You can manage it in Settings, under Extensions.");
+                return;
+            }
+
+            if (!Ext.Live)
+            {
+                Fail(Ext.Can ? "The browser is still starting. Try again in a moment." : Ext.Why);
+                return;
+            }
+
+            // The engine's version goes in the address, as Chrome's own would; read here, on the thread of the web view.
+            var version = f.Tab.View.CoreWebView2?.Environment.BrowserVersionString ?? string.Empty;
+
+            // 1. The download.
+            string pack;
+            try
+            {
+                pack = await Task.Run(() => store.Download());
+                f.Pack = pack;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Log.Error("ext", ex, "store " + f.Id + ": no place for the download");
+                Fail(Cws.Disk);
+                return;
+            }
+
+            var why = await Task.Run(() => Cws.Fetch(f.Id, version, pack, store.PackBytes, ct));
+            ct.ThrowIfCancellationRequested();
+            if (why is not null)
+            {
+                Fail(why);
+                return;
+            }
+
+            // 2. Whose package it is.
+            why = await Task.Run(() => CrxSig.Check(pack, f.Id));
+            ct.ThrowIfCancellationRequested();
+            if (why is not null)
+            {
+                Fail(why);
+                return;
+            }
+
+            // 3. Unpacked, and the file is not needed any more.
+            var (stage, err) = await Task.Run(() => store.Stage(pack));
+            f.Stage = stage;
+            f.Pack = null;
+            _ = ExtAdd.Keep(() => store.Release(pack));
+            ct.ThrowIfCancellationRequested();
+            if (stage is null)
+            {
+                Fail(err ?? "The package could not be opened.");
+                return;
+            }
+
+            // 4. What it is and what it can do.
+            var (meta, bad) = await Task.Run(() => ExtMeta.Read(store.StagePath(stage)));
+            ct.ThrowIfCancellationRequested();
+            if (meta is null)
+            {
+                Fail(bad ?? "The package is not an extension.");
+                return;
+            }
+
+            var bytes = meta.Icon is { } rel ? await Task.Run(() => CwsIcon(store.StagePath(stage), rel)) : null;
+            var icon = await CwsExtIcon(bytes, box.Skin);
+            ct.ThrowIfCancellationRequested();
+
+            // 5. The question. Nothing is added before the answer.
+            f.Meta = meta;
+            box.Ask(Cws.Tidy(meta.Name, 60), CwsNeatIcon(box.Skin), icon, meta.AskText);
+        }
+        catch (OperationCanceledException)
+        {
+            // The question was closed: nothing more to do or to say.
+        }
+        catch (Exception ex)
+        {
+            Log.Error("ext", ex, "store " + f.Id + ": the install failed");
+
+            if (!ct.IsCancellationRequested)
+                box.Say("Could not add the extension", "The extension could not be added.");
         }
     }
 
-    // Everything between the click and the answer. True when the extension is in (or was already).
-    private async Task<bool> CwsRun(CwsFlow f)
+    /// <summary>
+    /// Whether the extension of this store id is in, and its name when the browser can say it. The list of
+    /// copies says it came from the store; the browser's own list says it is still there (an extension that
+    /// was removed some other way is not in).
+    /// </summary>
+    private static async Task<(bool Has, string Name)> CwsHas(string id)
     {
-        var store = ExtAdd.Store;
-        var ct = f.Stop.Token;
+        var web = await Task.Run(() => ExtAdd.Store.WebId(id));
+        if (web is null)
+            return (false, string.Empty);
 
-        if (await CwsHas(f.Id))
-        {
-            Log.Write("ext", "store " + f.Id + ": already added");
-            return true;
-        }
-
+        // With no live profile to ask, the list of copies is all there is.
         if (!Ext.Live)
-            return await CwsFail(f, Ext.Can ? "The browser is still starting. Try again in a moment." : Ext.Why);
+            return (true, string.Empty);
 
-        // The engine's version goes in the address, as Chrome's own would; read here, on the thread of the web view.
-        var version = f.Tab.View.CoreWebView2?.Environment.BrowserVersionString ?? string.Empty;
+        var item = (await Ext.All()).FirstOrDefault(x => x.Id == web);
+        return item is null ? (false, string.Empty) : (true, item.Name);
+    }
 
-        // 1. The download.
-        string pack;
+    /// <summary>The person said Add to NEAT. Never throws.</summary>
+    private async Task CwsAdd(CwsFlow f, CwsBox box)
+    {
+        if (f.Busy || f.Added || f.Stage is null || f.Meta is not { } meta)
+            return;
+
         try
         {
-            pack = await Task.Run(() => store.Download());
-            f.Pack = pack;
+            // Adding takes a moment (the copy, then the browser). The dialog stays, says so, and cannot be closed meanwhile.
+            f.Busy = true;
+            box.Adding();
+
+            var done = await ExtAdd.Install(f.Stage, string.Empty, meta, f.Id, () => f.Stage = null);
+            f.Busy = false;
+
+            if (done.Res.Ok)
+            {
+                f.Added = true;
+                box.Dialog.Hide();
+                return;
+            }
+
+            // After a failure the person may try again, as long as the staging folder is still there to add from.
+            box.Problem(done.Res.Err ?? "The extension could not be added.", f.Stage is not null);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex)
         {
-            Log.Error("ext", ex, "store " + f.Id + ": no place for the download");
-            return await CwsFail(f, Cws.Disk);
+            f.Busy = false;
+            Log.Error("ext", ex, "store " + f.Id + ": adding failed");
+
+            if (!f.Added)
+                box.Problem("The extension could not be added.", f.Stage is not null);
         }
-
-        var why = await Task.Run(() => Cws.Fetch(f.Id, version, pack, store.PackBytes, ct));
-        ct.ThrowIfCancellationRequested();
-        if (why is not null)
-            return await CwsFail(f, why);
-
-        // 2. Whose package it is.
-        why = await Task.Run(() => CrxSig.Check(pack, f.Id));
-        ct.ThrowIfCancellationRequested();
-        if (why is not null)
-            return await CwsFail(f, why);
-
-        // 3. Unpacked, and the file is not needed any more.
-        var (stage, err) = await Task.Run(() => store.Stage(pack));
-        f.Stage = stage;
-        f.Pack = null;
-        _ = ExtAdd.Keep(() => store.Release(pack));
-        ct.ThrowIfCancellationRequested();
-        if (stage is null)
-            return await CwsFail(f, err ?? "The package could not be opened.");
-
-        // 4. What it is and what it can do.
-        var (meta, bad) = await Task.Run(() => ExtMeta.Read(store.StagePath(stage)));
-        if (meta is null)
-            return await CwsFail(f, bad ?? "The package is not an extension.");
-
-        var icon = meta.Icon is { } rel ? await Task.Run(() => CwsIcon(store.StagePath(stage), rel)) : null;
-        ct.ThrowIfCancellationRequested();
-
-        // 5. The question. Nothing is added before the answer.
-        return await CwsAsk(f, meta, icon);
     }
 
     // The icon's bytes, or null for one that cannot be used. The file was checked when the manifest was read;
@@ -426,36 +491,7 @@ public sealed partial class Win
         }
     }
 
-    // ---- the dialogs ----
-
-    private async Task<bool> CwsFail(CwsFlow f, string why)
-    {
-        Log.Write("ext", "store " + f.Id + ": " + why);
-        await CwsError(f, why);
-        return false;
-    }
-
-    /// <summary>A failure before the question, as a dialog: there is no other place in the window to say it.</summary>
-    private async Task CwsError(CwsFlow f, string why)
-    {
-        if (f.Stop.IsCancellationRequested || _closed || root.XamlRoot is not { } xr)
-            return;
-
-        var skin = CwsSkin();
-        var box = new ContentDialog
-        {
-            XamlRoot = xr,
-            Title = "Could not add the extension",
-            Content = new TextBlock { Text = why, FontSize = 14, Foreground = skin.Fg, TextWrapping = TextWrapping.Wrap },
-            CloseButtonText = "Close",
-            DefaultButton = ContentDialogButton.Close,
-            RequestedTheme = skin.Dark ? ElementTheme.Dark : ElementTheme.Light,
-            Background = skin.Bg,
-            Foreground = skin.Fg,
-        };
-
-        await CwsShow(f, box);
-    }
+    // ---- the dialog ----
 
     // The window's colours for a dialog (a Skin of its own, like every window that draws with one).
     private static Skin CwsSkin()
@@ -465,154 +501,31 @@ public sealed partial class Win
         return skin;
     }
 
-    // Shows a dialog and says how it was answered. Only one dialog can be open in a window: if another one is,
-    // ShowAsync throws, and the answer is "closed" (the install is dropped, and the line in the log says why).
-    private static async Task<ContentDialogResult> CwsShow(CwsFlow f, ContentDialog box)
+    // Shows the dialog and comes back when it has closed. Only one dialog can be open in a window: if another
+    // one is, ShowAsync throws, and the install is dropped (the line in the log says why).
+    private static async Task CwsShow(CwsFlow f, ContentDialog box)
     {
         f.Box = box;
 
-        try
-        {
-            return await box.ShowAsync();
-        }
-        catch (Exception ex)
-        {
-            Log.Error("ext", ex, "store " + f.Id + ": the dialog could not be shown");
-            return ContentDialogResult.None;
-        }
-        finally
-        {
-            f.Box = null;
-        }
-    }
-
-    /// <summary>
-    /// The question: Add "name" to NEAT? With what the extension can do, in the words of the Extensions page.
-    /// True when the extension was added. Cancel, Esc, closing the tab and closing the window all say no.
-    /// </summary>
-    private async Task<bool> CwsAsk(CwsFlow f, ExtMeta meta, byte[]? iconBytes)
-    {
-        if (f.Stop.IsCancellationRequested || _closed || root.XamlRoot is not { } xr)
-            return false;
-
-        var skin = CwsSkin();
-        var name = Cws.Tidy(meta.Name, 60);
-
-        // The two pictures: NEAT, an arrow, the extension. A picture that cannot be had is a glyph.
-        var pictures = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14, Margin = new Thickness(0, 0, 0, 12) };
-        pictures.Children.Add(CwsNeatIcon(skin));
-        pictures.Children.Add(new FontIcon { Glyph = "", FontSize = 16, Foreground = skin.Dim, VerticalAlignment = VerticalAlignment.Center });
-        pictures.Children.Add(await CwsExtIcon(iconBytes, skin));
-
-        var title = new StackPanel();
-        title.Children.Add(pictures);
-        title.Children.Add(new TextBlock
-        {
-            Text = "Add \"" + name + "\" to NEAT?",
-            FontSize = 20,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = skin.Fg,
-            TextWrapping = TextWrapping.Wrap,
-        });
-
-        // What the extension is, and what it can do. The same words as the Extensions page, from the same place.
-        var body = new StackPanel { Spacing = 12, Margin = new Thickness(0, 0, 12, 0) };
-
-        var about = "Version " + Cws.Tidy(meta.Version, 30);
-        if (Cws.Tidy(meta.Description, 300) is { Length: > 0 } words)
-            about += "\n" + words;
-
-        body.Children.Add(new TextBlock { Text = about, FontSize = 12, Foreground = skin.Dim, TextWrapping = TextWrapping.Wrap });
-
-        if (meta.RiskText is { } risk)
-        {
-            var warn = Block.Warn(risk);
-            warn.Margin = new Thickness(0);
-            body.Children.Add(warn);
-        }
-
-        if (meta.CanText is { } can)
-            body.Children.Add(new TextBlock { Text = can, FontSize = 13, Foreground = skin.Fg, TextWrapping = TextWrapping.Wrap });
-
-        if (meta.LegacyText is { } legacy)
-            body.Children.Add(new TextBlock { Text = legacy, FontSize = 12, Foreground = skin.Dim, TextWrapping = TextWrapping.Wrap });
-
-        var fail = new TextBlock
-        {
-            FontSize = 12,
-            Foreground = new SolidColorBrush(Microsoft.UI.Colors.IndianRed),
-            TextWrapping = TextWrapping.Wrap,
-            Visibility = Visibility.Collapsed,
-        };
-        body.Children.Add(fail);
-
-        var box = new ContentDialog
-        {
-            XamlRoot = xr,
-            Title = title,
-            Content = new ScrollViewer { MaxHeight = 320, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = body },
-            PrimaryButtonText = "Add to NEAT",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Primary,
-            RequestedTheme = skin.Dark ? ElementTheme.Dark : ElementTheme.Light,
-            Background = skin.Bg,
-            Foreground = skin.Fg,
-        };
-
-        // Adding takes a moment (the copy, then the browser). The dialog stays, says so, and cannot be closed meanwhile.
-        box.PrimaryButtonClick += async (s, a) =>
-        {
-            var deferral = a.GetDeferral();
-
-            try
-            {
-                f.Busy = true;
-                fail.Visibility = Visibility.Collapsed;
-                box.IsPrimaryButtonEnabled = false;
-                box.PrimaryButtonText = "Adding...";
-
-                var done = await ExtAdd.Install(f.Stage, string.Empty, meta, f.Id, () => f.Stage = null);
-
-                if (done.Res.Ok)
-                {
-                    f.Added = true;
-                    a.Cancel = false;
-                }
-                else
-                {
-                    a.Cancel = true;
-                    fail.Text = done.Res.Err ?? "The extension could not be added.";
-                    fail.Visibility = Visibility.Visible;
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Error("ext", ex, "store " + f.Id + ": adding failed");
-                a.Cancel = true;
-                fail.Text = "The extension could not be added.";
-                fail.Visibility = Visibility.Visible;
-            }
-            finally
-            {
-                f.Busy = false;
-
-                // After a failure the person may try again, as long as the staging folder is still there to add from.
-                box.PrimaryButtonText = "Add to NEAT";
-                box.IsPrimaryButtonEnabled = !f.Added && f.Stage is not null;
-                deferral.Complete();
-            }
-        };
-
+        // Adding cannot be walked away from halfway.
         box.Closing += (s, a) =>
         {
             if (f.Busy)
                 a.Cancel = true;
         };
 
-        await CwsShow(f, box);
-
-        Log.Write("ext", "store " + f.Id + " (" + name + "): " + (f.Added ? "added" : "not added"));
-        return f.Added;
+        try
+        {
+            await box.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("ext", ex, "store " + f.Id + ": the dialog could not be shown");
+        }
+        finally
+        {
+            f.Box = null;
+        }
     }
 
     // NEAT's own icon (the file next to neat.exe, which is the exe's icon too); a glyph when it is not there.

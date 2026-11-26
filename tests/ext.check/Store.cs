@@ -437,6 +437,14 @@ internal static partial class Program
         Need(both.RiskText is not null && both.RiskText.Contains("cookies") && !both.RiskText.Contains("notifications"), "the warning holds the risky one only: " + both.RiskText);
         Need(both.CanText == "It can also:\n\u2022 Show notifications", "the rest follows: " + both.CanText);
 
+        // The Chrome Web Store question has one list: everything, the high risk first, each line once.
+        Need(none.AskText == "It asks for no special permissions.", "the question says there is nothing: " + none.AskText);
+        Need(quiet.AskText == "It can:\n\u2022 Show notifications", "the question lists it: " + quiet.AskText);
+        Need(risky.AskText.StartsWith("It can:\n\u2022 Read and change your cookies"), "the question keeps the risky one: " + risky.AskText);
+        var mixed = Of(""" , "permissions": ["notifications", "cookies"] """);
+        Need(mixed.AskText.StartsWith("It can:\n\u2022 Read and change your cookies") && mixed.AskText.EndsWith("\n\u2022 Show notifications"), "the risky one comes first: " + mixed.AskText);
+        Need(mixed.AskText.Split('\u2022').Length - 1 == mixed.Can.Count, "every line once: " + mixed.AskText);
+
         // The older format is told so, and the new one is not.
         Need(Of("", 2).LegacyText is { } old && old.Contains("Manifest V2"), "Manifest V2 has its note");
         Need(Of("", 3).LegacyText is null, "Manifest V3 has none");
