@@ -40,6 +40,7 @@ public sealed partial class Win : Window
         BlkInit();
         FpInit();
         ExtInit();
+        CwsInit();
 
         // The first tab opens once the window is up.
         root.Loaded += OnLoaded;
@@ -92,6 +93,7 @@ public sealed partial class Win : Window
         BlkStop();
         FpStop();
         ExtStop();
+        CwsStop();
 
         if (AppWindow.Presenter is not OverlappedPresenter p)
             return;
@@ -158,6 +160,7 @@ public sealed partial class Win : Window
         Hook(tab, core);
         HookPass(tab, core);
         AdsHook(tab, core);
+        CwsHook(tab, core);
         await FpHook(tab, core);
 
         // Must be in place before the first page loads. Without it only the
@@ -174,6 +177,9 @@ public sealed partial class Win : Window
 
         // The script of the save-password bubble (win.pass.cs), in place for the same reason.
         await AddPassScript(core);
+
+        // The script of the "Add to NEAT" button of the Chrome Web Store (win.cws.cs), the same.
+        await AddCwsScript(core);
 
         // The first pages must not load before the blocker is ready (a few seconds at most).
         if (to is not null && !App.Ads.Ready)
@@ -295,6 +301,9 @@ public sealed partial class Win : Window
         _loginFrame.Remove(tab);
         _cardFrame.Remove(tab);
         _cardOrigin.Remove(tab);
+
+        // An extension this tab was adding from the Chrome Web Store is given up (win.cws.cs).
+        CwsTabClosed(tab);
 
         host.Children.Remove(tab.View);
         _tabs.RemoveAt(i);

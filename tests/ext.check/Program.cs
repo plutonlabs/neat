@@ -9,8 +9,11 @@ using neat;
 // The wrappers reach a profile only through IExtProf, so a fake stands in for it here. What this
 // proves is the contract the Settings page will rely on: a fresh profile lists nothing, nothing
 // throws, and a failure comes back as a sentence.
+//
+// The Chrome Web Store button's parts are checked in the files next to this one (the same class, in pieces):
+// Crx.cs the signature check, Fetch.cs the downloader, Store.cs the store ids, the downloads folder and the icon.
 
-internal static class Program
+internal static partial class Program
 {
     private static int _ran;
     private static int _failed;
@@ -60,6 +63,10 @@ internal static class Program
         Run("a package is staged, settled into the store, or dropped", StageFlow);
         Run("a refused package leaves nothing in staging", StageRefused);
         Run("the sweep deletes old staging folders, not held ones, not installed extensions", StageSweep);
+
+        CrxChecks();
+        FetchChecks();
+        StoreChecks();
 
         foreach (var dir in Made)
         {

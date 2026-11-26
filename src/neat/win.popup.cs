@@ -74,7 +74,7 @@ public sealed partial class Win
                 return;
             }
 
-            // 1. The scripts every page gets, finished before NewWindow is set. Each of the three
+            // 1. The scripts every page gets, finished before NewWindow is set. Each of them
             //    already catches and logs its own failure.
             try
             {
@@ -86,6 +86,7 @@ public sealed partial class Win
             }
 
             await AddPassScript(pop);
+            await AddCwsScript(pop);
             await FpRegister(tab, pop);
 
             // The tab may have been closed while the scripts were being added.
@@ -103,6 +104,7 @@ public sealed partial class Win
             Hook(tab, pop);
             HookPass(tab, pop);
             AdsHook(tab, pop);
+            CwsHook(tab, pop);
             FpEvents(tab, pop);
 
             // The window's first page is its address. Normally NavigationStarting says so itself and

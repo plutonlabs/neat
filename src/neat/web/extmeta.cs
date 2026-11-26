@@ -17,6 +17,15 @@ internal sealed class ExtMeta
     // A manifest is a few kilobytes; anything past this is not one.
     private const long Max = 1024 * 1024;
 
+    // An icon is a few kilobytes too. The biggest one that is allowed is read into memory to be shown.
+    private const long MaxIcon = 1024 * 1024;
+
+    // The widest or tallest an icon may be, in pixels (see Sane).
+    private const uint MaxPixels = 1024;
+
+    // The first 8 bytes of every PNG file.
+    private static readonly byte[] PngMagic = { 0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A };
+
     private static readonly JsonDocumentOptions Lax = new()
     {
         // Chrome accepts comments and trailing commas in manifest.json, and extensions use them.
@@ -90,6 +99,50 @@ internal sealed class ExtMeta
     public List<string> Risk { get; init; } = new();
 
     /// <summary>
+    /// The high risk warning in words (what the lines of <see cref="Risk"/> allow, and to trust where the
+    /// extension came from), or null when there is none. The Extensions page and the Chrome Web Store
+    /// question both say it this way, so it is made here, once.
+    /// </summary>
+    public string? RiskText => Risk.Count == 0
+        ? null
+        : "High risk. This extension can:\n" + Bullets(Risk) + "\nOnly add it if you trust where it came from.";
+
+    /// <summary>
+    /// What it can do besides that, as "It can:" (or "It can also:" after the warning) and the lines;
+    /// or, for an extension that asks for nothing notable, a line that says so. Each line is said once:
+    /// the high risk ones are in <see cref="RiskText"/>. Null when everything it can do is high risk.
+    /// </summary>
+    public string? CanText
+    {
+        get
+        {
+            var other = Can.Where(c => !Risk.Contains(c)).ToList();
+
+            if (other.Count > 0)
+                return (Risk.Count > 0 ? "It can also:\n" : "It can:\n") + Bullets(other);
+
+            return Can.Count == 0 ? "It asks for no special permissions." : null;
+        }
+    }
+
+    /// <summary>The note for an extension in the older Manifest V2 format; null for the others.</summary>
+    public string? LegacyText => Mv == 2
+        ? "This extension uses the older Manifest V2 format, which current versions of Chromium may refuse to run."
+        : null;
+
+    private static string Bullets(IEnumerable<string> lines)
+    {
+        return string.Join("\n", lines.Select(c => "• " + c));
+    }
+
+    /// <summary>
+    /// The extension's best icon as a path inside its folder (with / between the parts), or null when it
+    /// has none that can be used. The file has been checked: it is inside the folder, a PNG and not big.
+    /// Join it to the folder to read it.
+    /// </summary>
+    public string? Icon { get; init; }
+
+    /// <summary>
     /// Reads manifest.json in a folder. Returns the facts, or null and a sentence for the person
     /// when the folder is not an extension.
     /// </summary>
@@ -128,6 +181,7 @@ internal sealed class ExtMeta
                 Mv = mv,
                 Can = can,
                 Risk = risk,
+                Icon = BestIcon(folder, root),
             }, null);
         }
         catch (JsonException)
@@ -138,6 +192,126 @@ internal sealed class ExtMeta
         {
             return (null, "The folder could not be read.");
         }
+    }
+
+    /// <summary>
+    /// The largest usable entry of the manifest's "icons"; failing that, the toolbar icon
+    /// (action.default_icon, then browser_action.default_icon), again the largest. An entry that cannot be
+    /// used (see <see cref="Usable"/>) is skipped, not an error: the next one is tried.
+    /// </summary>
+    private static string? BestIcon(string folder, JsonElement root)
+    {
+        try
+        {
+            foreach (var key in new[] { "icons", "action", "browser_action" })
+            {
+                if (!root.TryGetProperty(key, out var holder) || holder.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                var list = key == "icons" ? holder : holder.TryGetProperty("default_icon", out var d) ? d : default;
+
+                foreach (var path in Sized(list))
+                {
+                    if (Usable(folder, path) is { } found)
+                        return found;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            // An icon is a nicety: no icon, not a failed install.
+        }
+
+        return null;
+    }
+
+    // The paths of an icon list, the biggest size first. The list is an object of size to path
+    // ({"16": "a.png", "128": "b.png"}), or, for default_icon, one path.
+    private static IEnumerable<string> Sized(JsonElement list)
+    {
+        if (list.ValueKind == JsonValueKind.String)
+        {
+            if (list.GetString() is { Length: > 0 } one)
+                yield return one;
+
+            yield break;
+        }
+
+        if (list.ValueKind != JsonValueKind.Object)
+            yield break;
+
+        var items = new List<(int Size, string Path)>();
+
+        foreach (var p in list.EnumerateObject())
+        {
+            if (p.Value.ValueKind != JsonValueKind.String || p.Value.GetString() is not { Length: > 0 } path)
+                continue;
+
+            // A key that is not a number is the least wanted, not an error.
+            items.Add((int.TryParse(p.Name, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var size) ? size : 0, path));
+        }
+
+        foreach (var item in items.OrderByDescending(i => i.Size))
+            yield return item.Path;
+    }
+
+    /// <summary>
+    /// The path of an icon as it will be used (cleaned, with / between the parts), or null when it must
+    /// not be: it has to stay inside the folder (no "..", no drive, no way out of it), be a .png file that
+    /// starts like a PNG, and not be big. The manifest comes from a stranger, so the path is not taken as it is.
+    /// </summary>
+    internal static string? Usable(string folder, string path)
+    {
+        // Chrome reads "/a.png" as a file of the extension, and either kind of slash.
+        var parts = path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length == 0 || !parts[^1].EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        foreach (var part in parts)
+        {
+            // ".." goes out; "." does nothing; ":" is a drive or a stream name.
+            if (part is "." or ".." || part.Contains(':') || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                return null;
+        }
+
+        var clean = string.Join('/', parts);
+        var root = Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var full = Path.GetFullPath(Path.Combine(root, clean));
+
+        // The same check again on the finished path, in case the parts above missed a way out.
+        if (!full.StartsWith(root, StringComparison.Ordinal))
+            return null;
+
+        var info = new FileInfo(full);
+        if (!info.Exists || info.Length is 0 or > MaxIcon || info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            return null;
+
+        var head = new byte[PngMagic.Length];
+        using var s = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+        return s.Read(head, 0, head.Length) == head.Length && head.AsSpan().SequenceEqual(PngMagic) ? clean : null;
+    }
+
+    /// <summary>
+    /// True when a PNG that was read from a package is small in pixels as well as in bytes. A few kilobytes of
+    /// PNG can describe a picture of a hundred million pixels, and the store's question draws the icon before the
+    /// person has said anything, so the size is read from the header (the first chunk, IHDR) and judged first.
+    /// Chrome's own icons are 128 pixels or less; the limit leaves room for the odd bigger one.
+    /// </summary>
+    internal static bool Sane(ReadOnlySpan<byte> png)
+    {
+        // 8 bytes of signature, then the chunk: 4 of length, "IHDR", 4 of width, 4 of height (big-endian).
+        if (png.Length < 24 || !png[..PngMagic.Length].SequenceEqual(PngMagic))
+            return false;
+
+        if (!png.Slice(12, 4).SequenceEqual("IHDR"u8))
+            return false;
+
+        var w = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png[16..]);
+        var h = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png[20..]);
+
+        return w is > 0 and <= MaxPixels && h is > 0 and <= MaxPixels;
     }
 
     private static string Str(JsonElement obj, string key)

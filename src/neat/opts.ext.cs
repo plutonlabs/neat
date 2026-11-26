@@ -36,30 +36,16 @@ public sealed partial class Opts
     // The folder a package was unpacked into while the person decides whether to add it; null when none.
     private string? _xStage;
 
-    // The copies NEAT keeps of the extensions. One for the whole app, used from the UI thread and, for the slow parts, a pool thread.
-    private static ExtStore? _xs;
-
-    private static ExtStore Xs => _xs ??= new ExtStore(Path.Combine(Env.Root, "Extensions"));
+    // The copies NEAT keeps of the extensions. One for the whole app (web/extadd.cs), shared with the
+    // Chrome Web Store button, used from the UI thread and, for the slow parts, a pool thread.
+    private static ExtStore Xs => ExtAdd.Store;
 
     /// <summary>
     /// Runs bookkeeping on a pool thread: writing the list of copies, deleting a folder. A failure
     /// is logged and goes no further, because the extension itself has already been added or
     /// removed by then and the page must go on.
     /// </summary>
-    private static Task Keep(Action work)
-    {
-        return Task.Run(() =>
-        {
-            try
-            {
-                work();
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                Log.Error("ext", ex, "extension copies could not be kept up to date");
-            }
-        });
-    }
+    private static Task Keep(Action work) => ExtAdd.Keep(work);
 
     // ---- building ----
 
@@ -381,25 +367,6 @@ public sealed partial class Opts
         }
     }
 
-    // The words of the high risk warning: bold, in the red that the failure lines use.
-    private static TextBlock Warn(string text)
-    {
-        return new TextBlock
-        {
-            Text = text,
-            FontSize = 12,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.IndianRed),
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(16, 12, 16, 12),
-        };
-    }
-
-    private static string Bullets(IEnumerable<string> lines)
-    {
-        return string.Join("\n", lines.Select(c => "\u2022 " + c));
-    }
-
     /// <summary>
     /// The question before anything is added: what the extension is and, in plain words, what it
     /// can do, with the high risk part said first and said as such. Cancel changes nothing. For a
@@ -412,56 +379,31 @@ public sealed partial class Opts
         {
             var body = _body;
 
-            // The copy is what is added, at the place it will stay: WebView2 remembers the folder,
-            // and the extension is gone the day that folder moves or changes. A folder is copied
-            // there; a package is already unpacked, and is moved there before WebView2 hears of it.
-            string dir;
-            try
-            {
-                if (stage is null)
-                {
-                    dir = await Task.Run(() => Xs.Put(path, meta.Name));
-                }
-                else
-                {
-                    var st = stage;
-                    dir = await Task.Run(() => Xs.Settle(st, meta.Name));
-                    _xStage = null;
-                }
-            }
-            catch (Exception ex)
-            {
-                // A package stays unpacked, so the person can try again or say Cancel.
-                Log.Error("ext", ex, "keeping an extension failed");
-                Fail(ex is InvalidOperationException ? ex.Message : "NEAT could not keep a copy of that extension.");
-                return;
-            }
+            // The copy, WebView2 and the list are the shared core's (web/extadd.cs). A package that has
+            // been moved is no longer ours to drop, which the core tells us the moment it happens.
+            var done = await ExtAdd.Install(stage, path, meta, null, () => _xStage = null);
+            var res = done.Res;
 
-            var res = await Ext.Add(Xs.Full(dir));
             if (!res.Ok || res.Item is null)
             {
-                await Keep(() => Xs.Discard(dir));
-                Log.Write("ext", "adding " + meta.Name + " failed");
+                var why = res.Err ?? "The extension could not be added.";
 
-                // A package has been moved by now, so the question cannot be asked again: the person starts over.
-                if (stage is null)
+                // No copy could be made: a package stays unpacked, so the person can try again or say Cancel.
+                // A package has been moved by now otherwise, so the question cannot be asked again: the person starts over.
+                if (stage is null || !done.Copied)
                 {
-                    Fail(res.Err ?? "The extension could not be added.");
+                    Fail(why);
                 }
                 else if (_body == body)
                 {
                     CloseTask();
-                    Say(res.Err ?? "The extension could not be added.");
+                    Say(why);
                 }
 
                 return;
             }
 
-            // Without this link the extension still works; only its version and description are lost.
-            await Keep(() => Xs.Link(res.Item.Id, dir));
-
             var shown = res.Item.Name.Length > 0 ? res.Item.Name : meta.Name;
-            Log.Write("ext", "added " + res.Item.Id + " (" + shown + ")");
 
             if (_body != body)
                 return;
@@ -476,17 +418,15 @@ public sealed partial class Opts
             Block.Row(_skin, meta.Name, meta.Description.Length > 0 ? meta.Description : null, Block.Value(_skin, "Version " + meta.Version)),
         };
 
-        if (meta.Risk.Count > 0)
-            rows.Add(Warn("High risk. This extension can:\n" + Bullets(meta.Risk) + "\nOnly add it if you trust where it came from."));
+        // The words are ExtMeta's, so that the Chrome Web Store question says the same.
+        if (meta.RiskText is { } risk)
+            rows.Add(Block.Warn(risk));
 
-        var other = meta.Can.Where(c => !meta.Risk.Contains(c)).ToList();
-        if (other.Count > 0)
-            rows.Add(Explain((meta.Risk.Count > 0 ? "It can also:\n" : "It can:\n") + Bullets(other)));
-        else if (meta.Can.Count == 0)
-            rows.Add(Explain("It asks for no special permissions."));
+        if (meta.CanText is { } can)
+            rows.Add(Explain(can));
 
-        if (meta.Mv == 2)
-            rows.Add(Explain("This extension uses the older Manifest V2 format, which current versions of Chromium may refuse to run."));
+        if (meta.LegacyText is { } legacy)
+            rows.Add(Explain(legacy));
 
         ShowTask("Add an extension", rows, Btn("Add extension", () => Work(Go)), Btn("Cancel", () => Start(CloseAdd)));
     }

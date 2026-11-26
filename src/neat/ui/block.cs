@@ -55,6 +55,23 @@ internal static class Block
         page.Width = Math.Clamp(room - 2 * Gutter, 0, PageMax);
     }
 
+    /// <summary>
+    /// A line of high risk warning: bold, in the red that the failure lines use. It has the margin of a row
+    /// of a card; a caller that puts it somewhere else sets its own.
+    /// </summary>
+    public static TextBlock Warn(string text)
+    {
+        return new TextBlock
+        {
+            Text = text,
+            FontSize = 12,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = new SolidColorBrush(Microsoft.UI.Colors.IndianRed),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(16, 12, 16, 12),
+        };
+    }
+
     public static TextBlock Head(Skin s, string text)
     {
         return new TextBlock

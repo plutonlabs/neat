@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- The self-check of the extension code that does not need WebView2: the wrappers
-       (src/neat/web/ext.cs), the manifest reader (extmeta.cs), the folder store (extstore.cs) and the .crx/.zip unpacker
-       (extpack.cs).
+       (src/neat/web/ext.cs), the manifest reader (extmeta.cs), the folder store (extstore.cs), the .crx/.zip unpacker
+       (extpack.cs), the Chrome Web Store downloader (cws.cs) and the .crx signature check (crxsig.cs).
        The wrappers talk to a
        profile only through a small interface, so they compile and run here without WebView2 or
        WinUI, against a fake profile; the real one (web/extprof.cs) is a few lines of glue and is
@@ -24,6 +24,8 @@
     <Compile Include="..\..\src\neat\web\extmeta.cs" LinkBase="web" />
     <Compile Include="..\..\src\neat\web\extstore.cs" LinkBase="web" />
     <Compile Include="..\..\src\neat\web\extpack.cs" LinkBase="web" />
+    <Compile Include="..\..\src\neat\web\cws.cs" LinkBase="web" />
+    <Compile Include="..\..\src\neat\web\crxsig.cs" LinkBase="web" />
   </ItemGroup>
 
 </Project>
