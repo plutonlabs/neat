@@ -52,6 +52,14 @@ jobs:
           node check-form.js
           node check-frame.js
 
+      # The script of the "Add to NEAT" button on the Chrome Web Store (src/neat/web/cwsjs.cs) is
+      # checked the same way, against a made-up store page (tests/cws.check).
+      - name: Store button script self-check
+        working-directory: tests/cws.check
+        run: |
+          npm ci --no-audit --no-fund
+          node check.js
+
       # The ad blocker's dll and filter lists (tools/fetch-ads.ps1). If they cannot be fetched the
       # build goes on without them and the app runs without a blocker.
       - name: Fetch ad blocker files
